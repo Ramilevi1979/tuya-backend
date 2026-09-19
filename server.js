@@ -4,7 +4,6 @@ const cors = require('cors');
 const { TuyaContext } = require('@tuya/tuya-connector-nodejs');
 
 const app = express();
-// ב-Render חובה להשתמש ב-process.env.PORT שאינו קבוע
 const PORT = process.env.PORT || 5000;
 
 // Middleware
@@ -18,7 +17,7 @@ const tuya = new TuyaContext({
   secretKey: process.env.TUYA_SECRET_KEY,
 });
 
-// נתיב ראשי למניעת 404 כשנכנסים לכתובת הבסיס
+// נתיב ראשי לבדיקה
 app.get('/', (req, res) => {
   res.send('🚀 Tuya Backend Service is running successfully!');
 });
@@ -33,7 +32,7 @@ app.get('/api/devices', async (req, res) => {
   try {
     const uid = process.env.TUYA_UID;
     if (!uid) {
-      return res.status(400).json({ error: 'TUYA_UID is not defined in environment variables' });
+      return res.status(400).json({ error: 'TUYA_UID is not defined in .env' });
     }
 
     const response = await tuya.request({
@@ -52,7 +51,7 @@ app.get('/api/devices', async (req, res) => {
   }
 });
 
-// שליחת פקודה למכשיר (הדלקה/כיבוי)
+// שליחת פקודה למכשיר רגיל (מתג/שקע)
 app.post('/api/devices/:id/command', async (req, res) => {
   const { id } = req.params;
   const { commands } = req.body; 
@@ -75,7 +74,58 @@ app.post('/api/devices/:id/command', async (req, res) => {
   }
 });
 
+// ==========================================
+// נתיבים חדשים עבור שלטי IR / רכזת אינפרא-אדום
+// ==========================================
+
+// 1. קבלת רשימת השלטים המשויכים לרכזת IR
+app.get('/api/ir/:infraredId/remotes', async (req, res) => {
+  try {
+    const { infraredId } = req.params;
+    const response = await tuya.request({
+      path: `/v1.0/infrareds/${infraredId}/remotes`,
+      method: 'GET',
+    });
+
+    if (!response.success) {
+      return res.status(400).json({ error: response.msg });
+    }
+
+    res.json({ success: true, remotes: response.result });
+  } catch (error) {
+    console.error('Error fetching IR remotes:', error);
+    res.status(500).json({ error: 'Failed to fetch IR remotes' });
+  }
+});
+
+// 2. שליחת פקודת IR למזגן (Power, Temp, Mode)
+app.post('/api/ir/:infraredId/remotes/:remoteId/ac-command', async (req, res) => {
+  try {
+    const { infraredId, remoteId } = req.params;
+    const { power, mode, temp } = req.body; // power: 1/0, mode: 0-4, temp: 16-30
+
+    const response = await tuya.request({
+      path: `/v1.0/infrareds/${infraredId}/ac-remotes/${remoteId}/command`,
+      method: 'POST',
+      body: {
+        power: power !== undefined ? power : 1,
+        mode: mode !== undefined ? mode : 0,
+        temp: temp !== undefined ? temp : 24,
+      },
+    });
+
+    if (!response.success) {
+      return res.status(400).json({ error: response.msg });
+    }
+
+    res.json({ success: true, result: response.result });
+  } catch (error) {
+    console.error('Error sending AC command:', error);
+    res.status(500).json({ error: 'Failed to send AC command' });
+  }
+});
+
 // הפעלת השרת
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 Tuya Automation Backend running on port ${PORT}`);
+app.listen(PORT, () => {
+  console.log(`🚀 Tuya Automation Backend running on http://localhost:${PORT}`);
 });
