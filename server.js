@@ -104,8 +104,9 @@ app.post('/api/ir/:infraredId/remotes/:remoteId/ac-command', async (req, res) =>
     const { infraredId, remoteId } = req.params;
     const { power, mode, temp } = req.body; // power: 1/0, mode: 0-4, temp: 16-30
 
+    // כאן תוקן הנתיב ל- air-conditioners
     const response = await tuya.request({
-      path: `/v1.0/infrareds/${infraredId}/ac-remotes/${remoteId}/command`,
+      path: `/v1.0/infrareds/${infraredId}/air-conditioners/${remoteId}/command`,
       method: 'POST',
       body: {
         power: power !== undefined ? power : 1,
