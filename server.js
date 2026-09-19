@@ -4,6 +4,7 @@ const cors = require('cors');
 const { TuyaContext } = require('@tuya/tuya-connector-nodejs');
 
 const app = express();
+// ב-Render חובה להשתמש ב-process.env.PORT שאינו קבוע
 const PORT = process.env.PORT || 5000;
 
 // Middleware
@@ -17,6 +18,11 @@ const tuya = new TuyaContext({
   secretKey: process.env.TUYA_SECRET_KEY,
 });
 
+// נתיב ראשי למניעת 404 כשנכנסים לכתובת הבסיס
+app.get('/', (req, res) => {
+  res.send('🚀 Tuya Backend Service is running successfully!');
+});
+
 // בדיקת תקינות השרת
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date() });
@@ -27,7 +33,7 @@ app.get('/api/devices', async (req, res) => {
   try {
     const uid = process.env.TUYA_UID;
     if (!uid) {
-      return res.status(400).json({ error: 'TUYA_UID is not defined in .env' });
+      return res.status(400).json({ error: 'TUYA_UID is not defined in environment variables' });
     }
 
     const response = await tuya.request({
@@ -70,6 +76,6 @@ app.post('/api/devices/:id/command', async (req, res) => {
 });
 
 // הפעלת השרת
-app.listen(PORT, () => {
-  console.log(`🚀 Tuya Automation Backend running on http://localhost:${PORT}`);
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`🚀 Tuya Automation Backend running on port ${PORT}`);
 });
