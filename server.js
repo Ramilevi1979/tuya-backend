@@ -10,13 +10,22 @@ app.use(cors());
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
-const TUYA_USER_ID = process.env.TUYA_USER_ID;
+
+// תמיכה גמישה בשמות משתני הסביבה (גם Render וגם מקומי)
+const TUYA_ACCESS_KEY = process.env.TUYA_ACCESS_KEY || process.env.TUYA_ACCESS_ID;
+const TUYA_SECRET_KEY = process.env.TUYA_SECRET_KEY;
+const TUYA_ENDPOINT = process.env.TUYA_ENDPOINT || 'https://openapi.tuyaeu.com';
+const TUYA_USER_ID = process.env.TUYA_USER_ID || process.env.TUYA_UID;
+
+if (!TUYA_ACCESS_KEY || !TUYA_SECRET_KEY) {
+  console.error('❌ שגיאה קריטית: מפתחות ה-API של Tuya (ACCESS_KEY / SECRET_KEY) אינם מוגדרים במשתני הסביבה!');
+}
 
 // הגדרת חיבור Tuya OpenAPI
 const tuya = new TuyaContext({
-  baseUrl: process.env.TUYA_ENDPOINT || 'https://openapi.tuyaeu.com',
-  accessKey: process.env.TUYA_ACCESS_KEY,
-  secretKey: process.env.TUYA_SECRET_KEY,
+  baseUrl: TUYA_ENDPOINT,
+  accessKey: TUYA_ACCESS_KEY,
+  secretKey: TUYA_SECRET_KEY,
 });
 
 // קובץ אחסון אוטומציות
