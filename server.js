@@ -64,7 +64,7 @@ const addLog = (title, source, status, action, details) => {
 
 // --- נתיבי API ---
 
-// 1. קבלת כל המכשירים (בפורמט המדויק שהפרונטאנד דורש: devices)
+// 1. קבלת כל המכשירים
 app.get('/api/devices', async (req, res) => {
   try {
     if (!TUYA_UID) {
@@ -141,11 +141,11 @@ app.post('/api/devices/:id/command', async (req, res) => {
         body: irPayload
       });
     } 
-    // מקרה 2: מתג או שקע חכם רגיל
+    // מקרה 2: מתג או שקע חכם רגיל (תוקן הנתיב ל- /v1.0/devices/... הנכון)
     else {
       const cleanCommands = commands ? commands.filter(c => c.code && c.value !== undefined) : [];
       response = await tuya.request({
-        path: `/v1.0/smart/devices/${id}/commands`,
+        path: `/v1.0/devices/${id}/commands`,
         method: 'POST',
         body: { commands: cleanCommands }
       });
@@ -155,14 +155,15 @@ app.post('/api/devices/:id/command', async (req, res) => {
       addLog(deviceName || id, 'manual', 'success', isAc ? 'הפעלת מזגן' : 'מתג', 'הפקודה נשלחה בהצלחה');
       res.json({ success: true, result: response.result });
     } else {
-      const errMsg = response?.msg || 'נדחה על ידי Tuya';
+      const errMsg = response?.msg || JSON.stringify(response) || 'נדחה על ידי Tuya';
       addLog(deviceName || id, 'manual', 'failed', 'שגיאת פקודה', errMsg);
       res.status(400).json({ success: false, error: errMsg });
     }
   } catch (err) {
     console.error('Command Error:', err);
-    addLog(deviceName || id, 'manual', 'failed', 'שגיאת שרת', err.message);
-    res.status(500).json({ success: false, error: err.message });
+    const errDetails = err.message || JSON.stringify(err);
+    addLog(deviceName || id, 'manual', 'failed', 'שגיאת שרת', errDetails);
+    res.status(500).json({ success: false, error: errDetails });
   }
 });
 
@@ -255,7 +256,7 @@ cron.schedule('* * * * *', () => {
         } else {
           const commands = [{ code: 'switch_1', value: commandValue }];
           await tuya.request({
-            path: `/v1.0/smart/devices/${auto.deviceId}/commands`,
+            path: `/v1.0/devices/${auto.deviceId}/commands`,
             method: 'POST',
             body: { commands }
           });
