@@ -121,14 +121,14 @@ app.post('/api/devices/:deviceId/command', async (req, res) => {
   }
 });
 
-// 4. שליחת פקודה למזגן IR
+// 4. שליחת פקודה למזגן IR (מתוקן: הוסרה המילה /ac מערוץ הבקשה)
 app.post('/api/ir/:infraredId/remotes/:remoteId/ac-command', async (req, res) => {
   const { infraredId, remoteId } = req.params;
   const { code, value } = req.body;
   try {
     const response = await tuya.request({
       method: 'POST',
-      path: `/v1.0/infrareds/${infraredId}/remotes/${remoteId}/ac/command`,
+      path: `/v1.0/infrareds/${infraredId}/remotes/${remoteId}/command`,
       body: { code, value },
     });
 
@@ -191,7 +191,6 @@ app.delete('/api/automations/:id', (req, res) => {
 setInterval(async () => {
   const now = new Date();
   
-  // חישוב שעה ויום נוכחיים בישראל
   const israelTimeString = now.toLocaleTimeString('en-GB', { timeZone: 'Asia/Jerusalem', hour: '2-digit', minute: '2-digit', hour12: false });
   const israelDateObj = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Jerusalem' }));
   const israelDay = israelDateObj.getDay();
@@ -205,54 +204,60 @@ setInterval(async () => {
 
     if (auto.time === israelTimeString && Array.isArray(auto.days) && auto.days.includes(israelDay)) {
       if (triggeredThisMinute.has(triggerKey)) {
-        continue; // הופעל כבר בדקה זו
+        continue;
       }
       triggeredThisMinute.add(triggerKey);
 
       console.log(`⏰ מפעיל אוטומציה מתוזמנת: ${auto.title}`);
       
       try {
+        let response;
         if (auto.type === 'ac') {
           const powerValue = auto.action === 'turn_on' ? 1 : 0;
-          await tuya.request({
+          response = await tuya.request({
             method: 'POST',
-            path: `/v1.0/infrareds/${auto.infraredId}/remotes/${auto.deviceId}/ac/command`,
+            path: `/v1.0/infrareds/${auto.infraredId}/remotes/${auto.deviceId}/command`,
             body: { code: 'power', value: powerValue }
           });
         } else {
           const switchValue = auto.action === 'turn_on' ? true : false;
-          await tuya.request({
+          response = await tuya.request({
             method: 'POST',
             path: `/v1.0/iot-03/devices/${auto.deviceId}/commands`,
             body: { commands: [{ code: 'switch_1', value: switchValue }] }
           });
         }
-        console.log(`✅ אוטומציה ${auto.title} הופעלה בהצלחה`);
 
-        // הגדרת טיימר כיבוי אוטומטי במידה והוגדר
-        if (auto.durationMinutes > 0) {
-          console.log(`⏱️ נקבע כיבוי אוטומטי בעוד ${auto.durationMinutes} דקות עבור: ${auto.title}`);
-          setTimeout(async () => {
-            console.log(`⏱️ מפעיל כיבוי אוטומטי עבור: ${auto.title}`);
-            try {
-              if (auto.type === 'ac') {
-                await tuya.request({
-                  method: 'POST',
-                  path: `/v1.0/infrareds/${auto.infraredId}/remotes/${auto.deviceId}/ac/command`,
-                  body: { code: 'power', value: 0 } // 0 = כיבוי
-                });
-              } else {
-                await tuya.request({
-                  method: 'POST',
-                  path: `/v1.0/iot-03/devices/${auto.deviceId}/commands`,
-                  body: { commands: [{ code: 'switch_1', value: false }] }
-                });
+        if (response && response.success) {
+          console.log(`✅ אוטומציה ${auto.title} הופעלה בהצלחה`);
+
+          // כיבוי אוטומטי במידה והוגדר
+          if (auto.durationMinutes > 0) {
+            console.log(`⏱️ נקבע כיבוי אוטומטי בעוד ${auto.durationMinutes} דקות עבור: ${auto.title}`);
+            setTimeout(async () => {
+              console.log(`⏱️ מפעיל כיבוי אוטומטי עבור: ${auto.title}`);
+              try {
+                if (auto.type === 'ac') {
+                  await tuya.request({
+                    method: 'POST',
+                    path: `/v1.0/infrareds/${auto.infraredId}/remotes/${auto.deviceId}/command`,
+                    body: { code: 'power', value: 0 }
+                  });
+                } else {
+                  await tuya.request({
+                    method: 'POST',
+                    path: `/v1.0/iot-03/devices/${auto.deviceId}/commands`,
+                    body: { commands: [{ code: 'switch_1', value: false }] }
+                  });
+                }
+                console.log(`✅ כיבוי אוטומטי הושלם בהצלחה: ${auto.title}`);
+              } catch (err) {
+                console.error(`❌ שגיאה בביצוע כיבוי אוטומטי ל-${auto.title}:`, err.message || err);
               }
-              console.log(`✅ כיבוי אוטומטי הושלם בהצלחה: ${auto.title}`);
-            } catch (err) {
-              console.error(`❌ שגיאה בביצוע כיבוי אוטומטי ל-${auto.title}:`, err.message || err);
-            }
-          }, auto.durationMinutes * 60 * 1000);
+            }, auto.durationMinutes * 60 * 1000);
+          }
+        } else {
+          console.error(`❌ כישלון בהפעלת אוטומציה ${auto.title}:`, response ? response.msg : 'Unknown error');
         }
       } catch (error) {
         console.error(`❌ שגיאה בהפעלת אוטומציה ${auto.title}:`, error.message || error);
@@ -260,7 +265,6 @@ setInterval(async () => {
     }
   }
 
-  // ניקוי זיכרון מפתחות ישנים
   if (triggeredThisMinute.size > 50) {
     triggeredThisMinute.clear();
   }
