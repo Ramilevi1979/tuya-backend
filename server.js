@@ -19,6 +19,13 @@ const tuya = new TuyaContext({
 });
 const TUYA_UID = process.env.TUYA_UID;
 
+// מזהה רכזת ה-IR שלך (שנלקח מהלוגים המאומתים)
+const FIXED_IR_HUB_ID = 'bf818853ec3c1fa781w3vo';
+
+// מפות תרגום למצבי מזגן ב-Tuya IR
+const MODE_MAP = { cool: 0, heat: 1, auto: 2, fan: 3, dry: 4 };
+const WIND_MAP = { auto: 0, low: 1, medium: 2, high: 3 };
+
 // אתחול מסד נתונים SQLite מקומי
 const db = new sqlite3.Database('./tuya.db', (err) => {
   if (err) console.error('Database connection error:', err.message);
@@ -80,28 +87,49 @@ app.get('/api/devices', async (req, res) => {
   }
 });
 
-// 2. שליחת פקודות ישירות למכשיר (הדרך המקורית והעובדת לכל סוגי המכשירים והמזגנים)
+// 2. שליחת פקודות (מתגים רגילים מול מזגני IR בנתיב הייעודי)
 app.post('/api/devices/:id/command', async (req, res) => {
   const { id } = req.params;
-  const { commands, deviceName } = req.body;
+  const { commands, deviceName, isAc, acPayload } = req.body;
 
   try {
-    const cleanCommands = commands ? commands.filter(c => c.code && c.value !== undefined) : [];
-    
-    console.log(`Sending command to device [${id}]:`, cleanCommands);
+    let response;
 
-    const response = await tuya.request({
-      path: `/v1.0/devices/${id}/commands`,
-      method: 'POST',
-      body: { commands: cleanCommands }
-    });
+    // מקרה 1: הפעלת מזגן דרך נתיב ה-IR של הרכזת
+    if (isAc && acPayload) {
+      const irPayload = {
+        power: acPayload.power ?? 1,
+        temp: Number(acPayload.temperature || 24),
+        mode: MODE_MAP[acPayload.mode] ?? 0,
+        wind: WIND_MAP[acPayload.wind] ?? 0
+      };
+
+      console.log(`Sending IR command via Hub [${FIXED_IR_HUB_ID}] to AC [${id}]:`, irPayload);
+
+      response = await tuya.request({
+        path: `/v1.0/infrareds/${FIXED_IR_HUB_ID}/air-conditioners/${id}/command`,
+        method: 'POST',
+        body: irPayload
+      });
+    } 
+    // מקרה 2: מתג או שקע חכם רגיל
+    else {
+      const cleanCommands = commands ? commands.filter(c => c.code && c.value !== undefined) : [];
+      console.log(`Sending standard command to device [${id}]:`, cleanCommands);
+
+      response = await tuya.request({
+        path: `/v1.0/devices/${id}/commands`,
+        method: 'POST',
+        body: { commands: cleanCommands }
+      });
+    }
 
     if (response && response.success) {
-      addLog(deviceName || id, 'manual', 'success', 'command', JSON.stringify(cleanCommands));
+      addLog(deviceName || id, 'manual', 'success', isAc ? 'הפעלת מזגן' : 'מתג', 'הפקודה נשלחה בהצלחה');
       res.json({ success: true, result: response.result });
     } else {
       const errMsg = response?.msg || JSON.stringify(response) || 'נדחה על ידי Tuya';
-      addLog(deviceName || id, 'manual', 'failed', 'command', errMsg);
+      addLog(deviceName || id, 'manual', 'failed', 'שגיאת פקודה', errMsg);
       res.status(400).json({ success: false, error: errMsg });
     }
   } catch (err) {
@@ -180,14 +208,24 @@ cron.schedule('* * * * *', () => {
 
       try {
         const commandValue = auto.action === 'turn_on' ? true : false;
-        const commands = [{ code: auto.type === 'ac' ? 'power' : 'switch_1', value: commandValue }];
         
-        await tuya.request({
-          path: `/v1.0/devices/${auto.deviceId}/commands`,
-          method: 'POST',
-          body: { commands }
-        });
-        addLog(auto.title, 'automation', 'success', auto.action, 'הופעל אוטומטית');
+        if (auto.type === 'ac') {
+          const irPayload = { power: commandValue ? 1 : 0, temp: 24, mode: 0, wind: 0 };
+          await tuya.request({
+            path: `/v1.0/infrareds/${FIXED_IR_HUB_ID}/air-conditioners/${auto.deviceId}/command`,
+            method: 'POST',
+            body: irPayload
+          });
+          addLog(auto.title, 'automation', 'success', auto.action, 'מזגן הופעל אוטומטית');
+        } else {
+          const commands = [{ code: 'switch_1', value: commandValue }];
+          await tuya.request({
+            path: `/v1.0/devices/${auto.deviceId}/commands`,
+            method: 'POST',
+            body: { commands }
+          });
+          addLog(auto.title, 'automation', 'success', auto.action, 'מתג הופעל אוטומטית');
+        }
       } catch (err) {
         addLog(auto.title, 'automation', 'failed', auto.action, err.message);
       }
