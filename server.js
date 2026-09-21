@@ -54,6 +54,42 @@ function saveAutomations(data) {
 let automations = loadAutomations();
 const triggeredThisMinute = new Set();
 
+// פונקציית עזר לשליחת פקודות למזגן עם מנגנון גיבוי
+async function sendAcCommandToTuya(infraredId, remoteId, code, value) {
+  const numericValue = Number(value);
+
+  // ניסיון 1: נתיב מזגנים תקני ב-Tuya OpenAPI
+  try {
+    const res1 = await tuya.request({
+      method: 'POST',
+      path: `/v1.0/infrareds/${infraredId}/air-conditioners/${remoteId}/command`,
+      body: { code, value: numericValue },
+    });
+    if (res1 && res1.success) return res1;
+  } catch (e) {
+    console.warn('Attempt 1 (air-conditioners standard) failed:', e.message);
+  }
+
+  // ניסיון 2: נתיב מזגנים עם מבנה פיילוד ישיר
+  try {
+    const res2 = await tuya.request({
+      method: 'POST',
+      path: `/v1.0/infrareds/${infraredId}/air-conditioners/${remoteId}/command`,
+      body: { [code]: numericValue },
+    });
+    if (res2 && res2.success) return res2;
+  } catch (e) {
+    console.warn('Attempt 2 (air-conditioners direct key) failed:', e.message);
+  }
+
+  // ניסיון 3: נתיב שלט כללי
+  return await tuya.request({
+    method: 'POST',
+    path: `/v1.0/infrareds/${infraredId}/remotes/${remoteId}/command`,
+    body: { code, value: numericValue },
+  });
+}
+
 // --- API ROUTES ---
 
 // 1. קבלת כל המכשירים
@@ -121,21 +157,17 @@ app.post('/api/devices/:deviceId/command', async (req, res) => {
   }
 });
 
-// 4. שליחת פקודה למזגן IR (מתוקן: הוסרה המילה /ac מערוץ הבקשה)
+// 4. שליחת פקודה למזגן IR (מתוקן: נתיב air-conditioners תקני)
 app.post('/api/ir/:infraredId/remotes/:remoteId/ac-command', async (req, res) => {
   const { infraredId, remoteId } = req.params;
   const { code, value } = req.body;
   try {
-    const response = await tuya.request({
-      method: 'POST',
-      path: `/v1.0/infrareds/${infraredId}/remotes/${remoteId}/command`,
-      body: { code, value },
-    });
+    const response = await sendAcCommandToTuya(infraredId, remoteId, code, value);
 
-    if (response.success) {
+    if (response && response.success) {
       res.json({ success: true, result: response.result });
     } else {
-      res.status(400).json({ success: false, error: response.msg || 'Failed to send AC command' });
+      res.status(400).json({ success: false, error: response ? response.msg : 'Failed to send AC command' });
     }
   } catch (error) {
     console.error('Error sending AC command:', error);
@@ -214,11 +246,7 @@ setInterval(async () => {
         let response;
         if (auto.type === 'ac') {
           const powerValue = auto.action === 'turn_on' ? 1 : 0;
-          response = await tuya.request({
-            method: 'POST',
-            path: `/v1.0/infrareds/${auto.infraredId}/remotes/${auto.deviceId}/command`,
-            body: { code: 'power', value: powerValue }
-          });
+          response = await sendAcCommandToTuya(auto.infraredId, auto.deviceId, 'power', powerValue);
         } else {
           const switchValue = auto.action === 'turn_on' ? true : false;
           response = await tuya.request({
@@ -238,11 +266,7 @@ setInterval(async () => {
               console.log(`⏱️ מפעיל כיבוי אוטומטי עבור: ${auto.title}`);
               try {
                 if (auto.type === 'ac') {
-                  await tuya.request({
-                    method: 'POST',
-                    path: `/v1.0/infrareds/${auto.infraredId}/remotes/${auto.deviceId}/command`,
-                    body: { code: 'power', value: 0 }
-                  });
+                  await sendAcCommandToTuya(auto.infraredId, auto.deviceId, 'power', 0);
                 } else {
                   await tuya.request({
                     method: 'POST',
