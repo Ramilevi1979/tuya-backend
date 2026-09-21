@@ -15,6 +15,22 @@ const tuya = new TuyaContext({
   secretKey: process.env.TUYA_SECRET_KEY,
 });
 
+// מערך בזיכרון לשמירת האוטומציות
+let automations = [];
+
+// פונקציית עזר לשליחת פקודה למכשיר Tuya
+async function sendCommandToTuya(deviceId, code, value) {
+  const response = await tuya.request({ 
+    path: `/v1.0/devices/${deviceId}/commands`, 
+    method: 'POST', 
+    body: { commands: [{ code, value }] } 
+  });
+  if (!response.success) {
+    throw new Error(response.msg || 'Failed to send command');
+  }
+  return response.result;
+}
+
 app.get('/', (req, res) => res.send('🚀 Tuya Backend Service is running successfully!'));
 app.get('/api/health', (req, res) => res.json({ status: 'ok', timestamp: new Date() }));
 
@@ -33,7 +49,8 @@ app.post('/api/devices/:id/command', async (req, res) => {
   const { id } = req.params;
   const { commands } = req.body; 
   try {
-    const response = await tuya.request({ path: `/v1.0/devices/${id}/commands`, method: 'POST', body: { commands } });
+    const cmds = Array.isArray(commands) ? commands : [commands];
+    const response = await tuya.request({ path: `/v1.0/devices/${id}/commands`, method: 'POST', body: { commands: cmds } });
     if (!response.success) return res.status(400).json({ error: response.msg });
     res.json({ success: true, result: response.result });
   } catch (error) {
@@ -51,7 +68,6 @@ app.get('/api/ir/:infraredId/remotes', async (req, res) => {
   }
 });
 
-// נתיב מתוקן - מקבל בדיוק 'code' ו-'value' כפי ש-Tuya דורשים
 app.post('/api/ir/:infraredId/remotes/:remoteId/ac-command', async (req, res) => {
   try {
     const { infraredId, remoteId } = req.params;
@@ -69,5 +85,79 @@ app.post('/api/ir/:infraredId/remotes/:remoteId/ac-command', async (req, res) =>
     res.status(500).json({ error: 'Failed to send AC command' });
   }
 });
+
+// ==========================================
+// ניהול אוטומציות ותזמונים
+// ==========================================
+
+app.get('/api/automations', (req, res) => {
+  res.json({ success: true, automations });
+});
+
+app.post('/api/automations', (req, res) => {
+  const { title, deviceId, code, value, time, days, durationMinutes } = req.body;
+  
+  if (!deviceId || !time) {
+    return res.status(400).json({ success: false, error: 'חובה לספק מזהה מכשיר ושעה' });
+  }
+
+  const newAuto = {
+    id: Date.now().toString(),
+    title: title || 'אוטומציה חדשה',
+    deviceId,
+    code: code || 'switch_1',
+    value: value !== undefined ? value : true,
+    time, // פורמט "HH:MM" (למשל "07:00")
+    days: days || [0, 1, 2, 3, 4, 5, 6],
+    durationMinutes: durationMinutes || 0 // כיבוי אוטומטי בדקות
+  };
+
+  automations.push(newAuto);
+  console.log('✅ נוצרה אוטומציה חדשה:', newAuto);
+  res.json({ success: true, automation: newAuto });
+});
+
+app.delete('/api/automations/:id', (req, res) => {
+  const { id } = req.params;
+  automations = automations.filter(a => a.id !== id);
+  console.log(`🗑️ נמחקה אוטומציה עם מזהה: ${id}`);
+  res.json({ success: true });
+});
+
+// לולאת ברקע שרצה כל דקה ובודקת האם להפעיל תזמונים לפי שעון ישראל
+setInterval(async () => {
+  try {
+    const now = new Date();
+    const currentTime = now.toLocaleTimeString('en-GB', { timeZone: 'Asia/Jerusalem', hour: '2-digit', minute: '2-digit' });
+    const currentDay = now.getDay(); // 0 = ראשון, 6 = שבת
+
+    for (const auto of automations) {
+      if (auto.time === currentTime && (!auto.days || auto.days.includes(currentDay))) {
+        console.log(`⏰ מפעיל אוטומציה מתוזמנת: ${auto.title}`);
+        
+        try {
+          await sendCommandToTuya(auto.deviceId, auto.code, auto.value);
+        } catch (cmdErr) {
+          console.error(`שגיאה בהפעלת אוטומציה ${auto.title}:`, cmdErr.message);
+        }
+
+        // אם הוגדר כיבוי אוטומטי לאחר מספר דקות (למשל לדוד)
+        if (auto.durationMinutes && auto.durationMinutes > 0) {
+          setTimeout(async () => {
+            try {
+              console.log(`⏱️ מפעיל כיבוי אוטומטי עבור: ${auto.title}`);
+              const offValue = typeof auto.value === 'boolean' ? !auto.value : false;
+              await sendCommandToTuya(auto.deviceId, auto.code, offValue);
+            } catch (err) {
+              console.error(`שגיאה בביצוע כיבוי אוטומטי ל-${auto.title}:`, err.message);
+            }
+          }, auto.durationMinutes * 60 * 1000);
+        }
+      }
+    }
+  } catch (err) {
+    console.error('שגיאה בלולאת האוטומציות:', err);
+  }
+}, 60 * 1000);
 
 app.listen(PORT, () => console.log(`🚀 Tuya Automation Backend running on http://localhost:${PORT}`));
