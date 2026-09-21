@@ -17,13 +17,15 @@ const tuya = new TuyaContext({
   accessKey: process.env.TUYA_ACCESS_ID,
   secretKey: process.env.TUYA_SECRET_KEY,
 });
+
 const TUYA_UID = process.env.TUYA_UID;
+const TUYA_IR_HUB_ID = process.env.TUYA_IR_HUB_ID;
 
 // מפות תרגום למצבי מזגן ב-Tuya IR
 const MODE_MAP = { cool: 0, heat: 1, auto: 2, fan: 3, dry: 4 };
 const WIND_MAP = { auto: 0, low: 1, medium: 2, high: 3 };
 
-// אתחול מסד נתונים SQLite
+// אתחול מסד נתונים SQLite מקומי
 const db = new sqlite3.Database('./tuya.db', (err) => {
   if (err) console.error('Database connection error:', err.message);
   else console.log('Connected to SQLite database.');
@@ -85,7 +87,7 @@ app.get('/api/devices', async (req, res) => {
   }
 });
 
-// 2. שליחת פקודות (זיהוי אוטומטי מלא בין מתג רגיל למזגן IR)
+// 2. שליחת פקודות (מתגים רגילים מול מזגני IR באמצעות TUYA_IR_HUB_ID)
 app.post('/api/devices/:id/command', async (req, res) => {
   const { id } = req.params;
   const { commands, deviceName, isAc, acPayload } = req.body;
@@ -93,42 +95,10 @@ app.post('/api/devices/:id/command', async (req, res) => {
   try {
     let response;
     
-    // מקרה 1: הפעלת מזגן (IR) - שימוש בנתיב האינפרא-אדום הייעודי של Tuya
+    // מקרה 1: הפעלת מזגן (IR) דרך הנתיב הייעודי והרכזת המוגדרת
     if (isAc && acPayload) {
-      let hubId = null;
-
-      // שלב א': חיפוש ה-parent_id של המזגן
-      try {
-        const devDetails = await tuya.request({
-          path: `/v1.0/devices/${id}`,
-          method: 'GET'
-        });
-        if (devDetails.success && devDetails.result && devDetails.result.parent_id) {
-          hubId = devDetails.result.parent_id;
-        }
-      } catch (e) {
-        console.log('Parent ID fetch skipped, searching hub manually...');
-      }
-
-      // שלב ב': אם לא נמצא parent_id, נחפש אוטומטית את רכזת ה-IR בחשבון
-      if (!hubId && TUYA_UID) {
-        const devicesRes = await tuya.request({
-          path: `/v1.0/users/${TUYA_UID}/devices`,
-          method: 'GET'
-        });
-        if (devicesRes.success && devicesRes.result) {
-          const irHub = devicesRes.result.find(d => 
-            (d.category && (d.category.toLowerCase().includes('ir') || d.category.toLowerCase().includes('wk') || d.category.toLowerCase().includes('control'))) ||
-            (d.name && (d.name.toLowerCase().includes('ir') || d.name.toLowerCase().includes('hub')))
-          );
-          if (irHub) {
-            hubId = irHub.id;
-          }
-        }
-      }
-
-      if (!hubId) {
-        throw new Error('לא נמצאה רכזת IR מקושרת לשליטה במזגן.');
+      if (!TUYA_IR_HUB_ID) {
+        throw new Error('משתנה הסביבה TUYA_IR_HUB_ID אינו מוגדר בשרת.');
       }
 
       const irPayload = {
@@ -138,10 +108,10 @@ app.post('/api/devices/:id/command', async (req, res) => {
         wind: WIND_MAP[acPayload.wind] ?? 0
       };
 
-      console.log(`Sending IR command via Hub [${hubId}] to AC [${id}]:`, irPayload);
+      console.log(`Sending IR command via Hub [${TUYA_IR_HUB_ID}] to AC [${id}]:`, irPayload);
 
       response = await tuya.request({
-        path: `/v1.0/infrareds/${hubId}/air-conditioners/${id}/command`,
+        path: `/v1.0/infrareds/${TUYA_IR_HUB_ID}/air-conditioners/${id}/command`,
         method: 'POST',
         body: irPayload
       });
@@ -244,17 +214,10 @@ cron.schedule('* * * * *', () => {
         const commandValue = auto.action === 'turn_on' ? true : false;
         
         if (auto.type === 'ac') {
-          let hubId = auto.infraredId;
-          if (!hubId) {
-            const devDetails = await tuya.request({ path: `/v1.0/devices/${auto.deviceId}`, method: 'GET' });
-            if (devDetails.success && devDetails.result && devDetails.result.parent_id) {
-              hubId = devDetails.result.parent_id;
-            }
-          }
-          if (hubId) {
+          if (TUYA_IR_HUB_ID) {
             const irPayload = { power: commandValue ? 1 : 0, temp: 24, mode: 0, wind: 0 };
             await tuya.request({
-              path: `/v1.0/infrareds/${hubId}/air-conditioners/${auto.deviceId}/command`,
+              path: `/v1.0/infrareds/${TUYA_IR_HUB_ID}/air-conditioners/${auto.deviceId}/command`,
               method: 'POST',
               body: irPayload
             });
