@@ -15,10 +15,8 @@ const tuya = new TuyaContext({
   secretKey: process.env.TUYA_SECRET_KEY,
 });
 
-// מערך בזיכרון לשמירת האוטומציות
 let automations = [];
 
-// פונקציית עזר לשליחת פקודה למכשיר Tuya
 async function sendCommandToTuya(deviceId, code, value) {
   const response = await tuya.request({ 
     path: `/v1.0/devices/${deviceId}/commands`, 
@@ -107,9 +105,9 @@ app.post('/api/automations', (req, res) => {
     deviceId,
     code: code || 'switch_1',
     value: value !== undefined ? value : true,
-    time, // פורמט "HH:MM" (למשל "07:00")
+    time, 
     days: days || [0, 1, 2, 3, 4, 5, 6],
-    durationMinutes: durationMinutes || 0 // כיבוי אוטומטי בדקות
+    durationMinutes: durationMinutes || 0 
   };
 
   automations.push(newAuto);
@@ -124,39 +122,43 @@ app.delete('/api/automations/:id', (req, res) => {
   res.json({ success: true });
 });
 
-// לולאת ברקע שרצה כל דקה ובודקת האם להפעיל תזמונים לפי שעון ישראל
+// לולאה רצה כל דקה עם לוגים מפורטים לדיבוג
 setInterval(async () => {
   try {
     const now = new Date();
     const currentTime = now.toLocaleTimeString('en-GB', { timeZone: 'Asia/Jerusalem', hour: '2-digit', minute: '2-digit' });
-    const currentDay = now.getDay(); // 0 = ראשון, 6 = שבת
+    const currentDay = now.getDay();
+    
+    console.log(`🔍 [Interval] שעון ישראל כעת: ${currentTime}, יום בשבוע: ${currentDay}, סך אוטומציות בזיכרון: ${automations.length}`);
 
     for (const auto of automations) {
+      console.log(`- בדיקת אוטומציה "${auto.title}": מיועדת לשעה ${auto.time}`);
       if (auto.time === currentTime && (!auto.days || auto.days.includes(currentDay))) {
         console.log(`⏰ מפעיל אוטומציה מתוזמנת: ${auto.title}`);
         
         try {
           await sendCommandToTuya(auto.deviceId, auto.code, auto.value);
+          console.log(`✨ פקודה נשלחה בהצלחה עבור: ${auto.title}`);
         } catch (cmdErr) {
-          console.error(`שגיאה בהפעלת אוטומציה ${auto.title}:`, cmdErr.message);
+          console.error(`❌ שגיאה בהפעלת אוטומציה ${auto.title}:`, cmdErr.message);
         }
 
-        // אם הוגדר כיבוי אוטומטי לאחר מספר דקות (למשל לדוד)
         if (auto.durationMinutes && auto.durationMinutes > 0) {
           setTimeout(async () => {
             try {
               console.log(`⏱️ מפעיל כיבוי אוטומטי עבור: ${auto.title}`);
               const offValue = typeof auto.value === 'boolean' ? !auto.value : false;
               await sendCommandToTuya(auto.deviceId, auto.code, offValue);
+              console.log(`✨ כיבוי אוטומטי בוצע בהצלחה עבור: ${auto.title}`);
             } catch (err) {
-              console.error(`שגיאה בביצוע כיבוי אוטומטי ל-${auto.title}:`, err.message);
+              console.error(`❌ שגיאה בביצוע כיבוי אוטומטי ל-${auto.title}:`, err.message);
             }
           }, auto.durationMinutes * 60 * 1000);
         }
       }
     }
   } catch (err) {
-    console.error('שגיאה בלולאת האוטומציות:', err);
+    console.error('❌ שגיאה בלולאת האוטומציות:', err);
   }
 }, 60 * 1000);
 
