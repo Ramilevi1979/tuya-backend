@@ -99,30 +99,74 @@ app.get('/', (req, res) => {
   res.json({ success: true, message: 'Tuya Backend API is running smoothly 🚀' });
 });
 
-// 1. קבלת כל המכשירים
+// 1. קבלת כל המכשירים - גילוי אוטומטי מלא (כולל שלטי IR ומגבלת עמודים)
 app.get('/api/devices', async (req, res) => {
   try {
+    // א. משיכת כל המכשירים הראשיים (עד 100 מכשירים בקריאה אחת)
     const pathUrl = TUYA_USER_ID 
-      ? `/v1.0/users/${TUYA_USER_ID}/devices` 
-      : `/v1.0/iot-03/devices`;
+      ? `/v1.0/users/${TUYA_USER_ID}/devices?page_no=1&page_size=100` 
+      : `/v1.0/iot-03/devices?page_no=1&page_size=100`;
 
     const response = await tuya.request({
       method: 'GET',
       path: pathUrl,
     });
 
-    if (response.success) {
-      res.json({ success: true, devices: response.result || [] });
-    } else {
-      res.status(400).json({ success: false, error: response.msg || 'Failed to fetch devices' });
+    if (!response.success) {
+      return res.status(400).json({ success: false, error: response.msg || 'Failed to fetch devices' });
     }
+
+    const rawDevices = response.result || [];
+    let allDevices = [...rawDevices];
+
+    // ב. זיהוי אוטומטי של כל רכזות ה-IR בחשבון
+    const irHubs = rawDevices.filter(d => 
+      d.category === 'wnykq' || 
+      d.category === 'pjkq' || 
+      d.category === 'ykq' || 
+      (d.product_name && d.product_name.toLowerCase().includes('ir'))
+    );
+
+    // ג. משיכת כל שלטי ה-IR מכל הרכזות במקביל
+    for (const hub of irHubs) {
+      try {
+        const remotesRes = await tuya.request({
+          method: 'GET',
+          path: `/v2.0/infrareds/${hub.id}/remotes`,
+        });
+
+        if (remotesRes && remotesRes.success && Array.isArray(remotesRes.result)) {
+          // תיוג השלטים והוספת מזהה הרכזת המובילה
+          const remotes = remotesRes.result.map(remote => ({
+            ...remote,
+            infraredId: hub.id,
+            isVirtualIr: true,
+            // הגדרת קטגוריה אוטומטית למזגן/טלוויזיה במידה וחסר
+            category: remote.category_id === 5 ? 'infrared_ac' : (remote.category_id === 2 ? 'infrared_tv' : remote.category)
+          }));
+
+          // הוספה לרשימה הראשית במידה והשלט לא קיים שם כבר
+          remotes.forEach(remote => {
+            if (!allDevices.some(d => d.id === remote.id)) {
+              allDevices.push(remote);
+            }
+          });
+        }
+      } catch (err) {
+        console.warn(`Failed to fetch remotes for hub ${hub.id}:`, err.message);
+      }
+    }
+
+    console.log(`📱 סך הכל נמצאו ${allDevices.length} מכשירים ושלטים בחשבון`);
+    res.json({ success: true, devices: allDevices });
+
   } catch (error) {
-    console.error('Error fetching devices:', error);
+    console.error('Error fetching all devices dynamically:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });
 
-// 2. קבלת שלטי IR עבור רכזת
+// 2. קבלת שלטי IR עבור רכזת ספציפית
 app.get('/api/ir/:infraredId/remotes', async (req, res) => {
   const { infraredId } = req.params;
   try {
