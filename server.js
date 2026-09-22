@@ -16,6 +16,8 @@ const TUYA_ACCESS_KEY = process.env.TUYA_ACCESS_KEY || process.env.TUYA_ACCESS_I
 const TUYA_SECRET_KEY = process.env.TUYA_SECRET_KEY;
 const TUYA_ENDPOINT = process.env.TUYA_ENDPOINT || 'https://openapi.tuyaeu.com';
 const TUYA_USER_ID = process.env.TUYA_USER_ID || process.env.TUYA_UID;
+// רכזת IR 
+const TUYA_IR_HUB_ID = process.env.TUYA_IR_HUB_ID || 'bf818853ec3c1fa781w3vo';
 
 if (!TUYA_ACCESS_KEY || !TUYA_SECRET_KEY) {
   console.error('❌ שגיאה קריטית: מפתחות ה-API של Tuya (ACCESS_KEY / SECRET_KEY) אינם מוגדרים במשתני הסביבה!');
@@ -57,12 +59,13 @@ const triggeredThisMinute = new Set();
 // פונקציית עזר לשליחת פקודות למזגן עם מנגנון גיבוי
 async function sendAcCommandToTuya(infraredId, remoteId, code, value) {
   const numericValue = Number(value);
+  const targetInfraredId = infraredId || TUYA_IR_HUB_ID;
 
   // ניסיון 1: נתיב מזגנים תקני ב-Tuya OpenAPI
   try {
     const res1 = await tuya.request({
       method: 'POST',
-      path: `/v1.0/infrareds/${infraredId}/air-conditioners/${remoteId}/command`,
+      path: `/v1.0/infrareds/${targetInfraredId}/air-conditioners/${remoteId}/command`,
       body: { code, value: numericValue },
     });
     if (res1 && res1.success) return res1;
@@ -74,7 +77,7 @@ async function sendAcCommandToTuya(infraredId, remoteId, code, value) {
   try {
     const res2 = await tuya.request({
       method: 'POST',
-      path: `/v1.0/infrareds/${infraredId}/air-conditioners/${remoteId}/command`,
+      path: `/v1.0/infrareds/${targetInfraredId}/air-conditioners/${remoteId}/command`,
       body: { [code]: numericValue },
     });
     if (res2 && res2.success) return res2;
@@ -85,7 +88,7 @@ async function sendAcCommandToTuya(infraredId, remoteId, code, value) {
   // ניסיון 3: נתיב שלט כללי
   return await tuya.request({
     method: 'POST',
-    path: `/v1.0/infrareds/${infraredId}/remotes/${remoteId}/command`,
+    path: `/v1.0/infrareds/${targetInfraredId}/remotes/${remoteId}/command`,
     body: { code, value: numericValue },
   });
 }
@@ -135,21 +138,30 @@ app.get('/api/ir/:infraredId/remotes', async (req, res) => {
   }
 });
 
-// 3. שליחת פקודה למתג/דוד רגיל
-app.post('/api/devices/:deviceId/command', async (req, res) => {
-  const { deviceId } = req.params;
-  const { commands } = req.body;
+// 3. שליחת פקודה דרך הפרונטאנד הנוכחי - מכשירים ומזגנים (הגשר)
+app.post('/api/devices/:id/command', async (req, res) => {
+  const { id } = req.params;
+  const { commands, isAc, acPayload, infraredId } = req.body;
+  
   try {
+    // אם זו בקשת מזגן - נעביר לפונקציה הייעודית של ה-IR
+    if (isAc && acPayload) {
+      const response = await sendAcCommandToTuya(infraredId, id, 'power', acPayload.power);
+      return res.json({ success: true, result: response });
+    }
+
+    // מתג רגיל
+    const cleanCommands = commands ? commands.filter(c => c.code && c.value !== undefined) : [];
     const response = await tuya.request({
       method: 'POST',
-      path: `/v1.0/iot-03/devices/${deviceId}/commands`,
-      body: { commands },
+      path: `/v1.0/iot-03/devices/${id}/commands`,
+      body: { commands: cleanCommands }
     });
 
-    if (response.success) {
+    if (response && response.success) {
       res.json({ success: true, result: response.result });
     } else {
-      res.status(400).json({ success: false, error: response.msg || 'Failed to send command' });
+      res.status(400).json({ success: false, error: response?.msg || 'נדחה על ידי Tuya' });
     }
   } catch (error) {
     console.error('Error sending device command:', error);
@@ -157,7 +169,7 @@ app.post('/api/devices/:deviceId/command', async (req, res) => {
   }
 });
 
-// 4. שליחת פקודה למזגן IR (מתוקן: נתיב air-conditioners תקני)
+// 4. שליחת פקודה למזגן IR דרך הנתיב הישן (לגיבוי)
 app.post('/api/ir/:infraredId/remotes/:remoteId/ac-command', async (req, res) => {
   const { infraredId, remoteId } = req.params;
   const { code, value } = req.body;
