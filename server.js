@@ -9,14 +9,13 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 5000;
 
-// תמיכה גמישה בשמות משתני הסביבה (גם Render וגם מקומי)
+// תמיכה גמישה בשמות משתני הסביבה (Render ומקומי)
 const TUYA_ACCESS_KEY = process.env.TUYA_ACCESS_KEY || process.env.TUYA_ACCESS_ID;
 const TUYA_SECRET_KEY = process.env.TUYA_SECRET_KEY;
 const TUYA_ENDPOINT = process.env.TUYA_ENDPOINT || 'https://openapi.tuyaeu.com';
 const TUYA_USER_ID = process.env.TUYA_USER_ID || process.env.TUYA_UID;
-// רכזת IR 
 const TUYA_IR_HUB_ID = process.env.TUYA_IR_HUB_ID || 'bf818853ec3c1fa781w3vo';
 
 if (!TUYA_ACCESS_KEY || !TUYA_SECRET_KEY) {
@@ -95,6 +94,11 @@ async function sendAcCommandToTuya(infraredId, remoteId, code, value) {
 
 // --- API ROUTES ---
 
+// 0. נתיב ראשי / בדיקת תקינות (Health Check)
+app.get('/', (req, res) => {
+  res.json({ success: true, message: 'Tuya Backend API is running smoothly 🚀' });
+});
+
 // 1. קבלת כל המכשירים
 app.get('/api/devices', async (req, res) => {
   try {
@@ -138,24 +142,24 @@ app.get('/api/ir/:infraredId/remotes', async (req, res) => {
   }
 });
 
-// 3. שליחת פקודה דרך הפרונטאנד הנוכחי - מכשירים ומזגנים (הגשר)
+// 3. שליחת פקודות (גשר מאוחד למתגים רגילים ולמזגנים)
 app.post('/api/devices/:id/command', async (req, res) => {
   const { id } = req.params;
   const { commands, isAc, acPayload, infraredId } = req.body;
-  
+
   try {
-    // אם זו בקשת מזגן - נעביר לפונקציה הייעודית של ה-IR
+    // אם המשתמש מפעיל מזגן דרך הממשק
     if (isAc && acPayload) {
       const response = await sendAcCommandToTuya(infraredId, id, 'power', acPayload.power);
       return res.json({ success: true, result: response });
     }
 
-    // מתג רגיל
+    // מתג / שקע חכם רגיל
     const cleanCommands = commands ? commands.filter(c => c.code && c.value !== undefined) : [];
     const response = await tuya.request({
       method: 'POST',
       path: `/v1.0/iot-03/devices/${id}/commands`,
-      body: { commands: cleanCommands }
+      body: { commands: cleanCommands },
     });
 
     if (response && response.success) {
@@ -169,7 +173,7 @@ app.post('/api/devices/:id/command', async (req, res) => {
   }
 });
 
-// 4. שליחת פקודה למזגן IR דרך הנתיב הישן (לגיבוי)
+// 4. שליחת פקודה למזגן IR דרך הנתיב הישיר
 app.post('/api/ir/:infraredId/remotes/:remoteId/ac-command', async (req, res) => {
   const { infraredId, remoteId } = req.params;
   const { code, value } = req.body;
@@ -204,7 +208,7 @@ app.post('/api/automations', (req, res) => {
       action: req.body.action || 'turn_on', // 'turn_on' או 'turn_off'
       time: req.body.time, // 'HH:mm'
       days: req.body.days || [], // [0..6]
-      durationMinutes: Number(req.body.durationMinutes) || 0
+      durationMinutes: Number(req.body.durationMinutes) || 0,
     };
 
     automations.push(newAuto);
