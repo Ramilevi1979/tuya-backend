@@ -238,6 +238,43 @@ app.delete('/api/automations/:id', (req, res) => {
   }
 });
 
+// 8. ראוט מחקר - משיכת מפרט ופקודות של מכשיר מ-Tuya
+app.get('/api/debug/device/:id', async (req, res) => {
+  const { id } = req.params;
+  try {
+    console.log(`[Debug] שולף מפרט עבור מכשיר: ${id}`);
+
+    // פרטי המכשיר והקטגוריה
+    const detailsRes = await tuya.request({
+      method: 'GET',
+      path: `/v1.0/iot-03/devices/${id}`,
+    });
+
+    // סטטוס נוכחי
+    const statusRes = await tuya.request({
+      method: 'GET',
+      path: `/v1.0/iot-03/devices/${id}/status`,
+    });
+
+    // רשימת הפקודות והערכים המותרים
+    const functionsRes = await tuya.request({
+      method: 'GET',
+      path: `/v1.0/iot-03/devices/${id}/functions`,
+    });
+
+    res.json({
+      success: true,
+      deviceId: id,
+      details: detailsRes.result || {},
+      status: statusRes.result || [],
+      functions: functionsRes.result || {},
+    });
+  } catch (error) {
+    console.error('Error in debug device endpoint:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // --- מנגנון בדיקת והפעלת אוטומציות לפי שעון ישראל ---
 setInterval(async () => {
   const now = new Date();
@@ -264,16 +301,16 @@ setInterval(async () => {
       try {
         let response;
         if (auto.type === 'ac') {
-  if (auto.action === 'turn_on') {
-    response = await sendAcCommandToTuya(auto.infraredId, auto.deviceId, 'power', 1);
-    
-    if (auto.temp) await sendAcCommandToTuya(auto.infraredId, auto.deviceId, 'temp', auto.temp);
-    if (auto.mode !== undefined) await sendAcCommandToTuya(auto.infraredId, auto.deviceId, 'mode', auto.mode);
-    if (auto.wind !== undefined) await sendAcCommandToTuya(auto.infraredId, auto.deviceId, 'wind', auto.wind);
-  } else {
-    response = await sendAcCommandToTuya(auto.infraredId, auto.deviceId, 'power', 0);
-  }
-} else {
+          if (auto.action === 'turn_on') {
+            response = await sendAcCommandToTuya(auto.infraredId, auto.deviceId, 'power', 1);
+            
+            if (auto.temp) await sendAcCommandToTuya(auto.infraredId, auto.deviceId, 'temp', auto.temp);
+            if (auto.mode !== undefined) await sendAcCommandToTuya(auto.infraredId, auto.deviceId, 'mode', auto.mode);
+            if (auto.wind !== undefined) await sendAcCommandToTuya(auto.infraredId, auto.deviceId, 'wind', auto.wind);
+          } else {
+            response = await sendAcCommandToTuya(auto.infraredId, auto.deviceId, 'power', 0);
+          }
+        } else {
           const switchValue = auto.action === 'turn_on' ? true : false;
           response = await tuya.request({
             method: 'POST',
