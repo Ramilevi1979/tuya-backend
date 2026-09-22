@@ -1,238 +1,299 @@
-require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const fs = require('fs');
+const path = require('path');
 const { TuyaContext } = require('@tuya/tuya-connector-nodejs');
-const sqlite3 = require('sqlite3').verbose();
-const cron = require('node-cron');
+require('dotenv').config();
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 3000;
 
-// אתחול חיבור ל-Tuya
+// תמיכה גמישה בשמות משתני הסביבה (גם Render וגם מקומי)
+const TUYA_ACCESS_KEY = process.env.TUYA_ACCESS_KEY || process.env.TUYA_ACCESS_ID;
+const TUYA_SECRET_KEY = process.env.TUYA_SECRET_KEY;
+const TUYA_ENDPOINT = process.env.TUYA_ENDPOINT || 'https://openapi.tuyaeu.com';
+const TUYA_USER_ID = process.env.TUYA_USER_ID || process.env.TUYA_UID;
+
+if (!TUYA_ACCESS_KEY || !TUYA_SECRET_KEY) {
+  console.error('❌ שגיאה קריטית: מפתחות ה-API של Tuya (ACCESS_KEY / SECRET_KEY) אינם מוגדרים במשתני הסביבה!');
+}
+
+// הגדרת חיבור Tuya OpenAPI
 const tuya = new TuyaContext({
-  baseUrl: process.env.TUYA_ENDPOINT || 'https://openapi.tuyaeu.com',
-  accessKey: process.env.TUYA_ACCESS_ID,
-  secretKey: process.env.TUYA_SECRET_KEY,
-});
-const TUYA_UID = process.env.TUYA_UID;
-
-// מזהה רכזת ה-IR שלך (שנלקח מהלוגים המאומתים)
-const FIXED_IR_HUB_ID = 'bf818853ec3c1fa781w3vo';
-
-// מפות תרגום למצבי מזגן ב-Tuya IR
-const MODE_MAP = { cool: 0, heat: 1, auto: 2, fan: 3, dry: 4 };
-const WIND_MAP = { auto: 0, low: 1, medium: 2, high: 3 };
-
-// אתחול מסד נתונים SQLite מקומי
-const db = new sqlite3.Database('./tuya.db', (err) => {
-  if (err) console.error('Database connection error:', err.message);
-  else console.log('Connected to SQLite database.');
+  baseUrl: TUYA_ENDPOINT,
+  accessKey: TUYA_ACCESS_KEY,
+  secretKey: TUYA_SECRET_KEY,
 });
 
-db.serialize(() => {
-  db.run(`CREATE TABLE IF NOT EXISTS automations (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    title TEXT,
-    type TEXT,
-    deviceId TEXT,
-    action TEXT,
-    time TEXT,
-    days TEXT,
-    durationMinutes INTEGER
-  )`);
+// קובץ אחסון אוטומציות
+const AUTOMATIONS_FILE = path.join(__dirname, 'automations.json');
 
-  db.run(`CREATE TABLE IF NOT EXISTS logs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    timestamp TEXT,
-    title TEXT,
-    source TEXT,
-    status TEXT,
-    action TEXT,
-    details TEXT
-  )`);
-});
+function loadAutomations() {
+  try {
+    if (fs.existsSync(AUTOMATIONS_FILE)) {
+      const data = fs.readFileSync(AUTOMATIONS_FILE, 'utf8');
+      return JSON.parse(data);
+    }
+  } catch (err) {
+    console.error('Error reading automations file:', err);
+  }
+  return [];
+}
 
-// פונקציית עזר לרישום אירועים בלוג
-const addLog = (title, source, status, action, details) => {
-  const timestamp = new Date().toLocaleString('he-IL');
-  db.run(
-    `INSERT INTO logs (timestamp, title, source, status, action, details) VALUES (?, ?, ?, ?, ?, ?)`,
-    [timestamp, title, source, status, action, details]
-  );
-};
+function saveAutomations(data) {
+  try {
+    fs.writeFileSync(AUTOMATIONS_FILE, JSON.stringify(data, null, 2), 'utf8');
+  } catch (err) {
+    console.error('Error saving automations file:', err);
+  }
+}
 
-// --- נתיבי API ---
+let automations = loadAutomations();
+const triggeredThisMinute = new Set();
+
+// פונקציית עזר לשליחת פקודות למזגן עם מנגנון גיבוי
+async function sendAcCommandToTuya(infraredId, remoteId, code, value) {
+  const numericValue = Number(value);
+
+  // ניסיון 1: נתיב מזגנים תקני ב-Tuya OpenAPI
+  try {
+    const res1 = await tuya.request({
+      method: 'POST',
+      path: `/v1.0/infrareds/${infraredId}/air-conditioners/${remoteId}/command`,
+      body: { code, value: numericValue },
+    });
+    if (res1 && res1.success) return res1;
+  } catch (e) {
+    console.warn('Attempt 1 (air-conditioners standard) failed:', e.message);
+  }
+
+  // ניסיון 2: נתיב מזגנים עם מבנה פיילוד ישיר
+  try {
+    const res2 = await tuya.request({
+      method: 'POST',
+      path: `/v1.0/infrareds/${infraredId}/air-conditioners/${remoteId}/command`,
+      body: { [code]: numericValue },
+    });
+    if (res2 && res2.success) return res2;
+  } catch (e) {
+    console.warn('Attempt 2 (air-conditioners direct key) failed:', e.message);
+  }
+
+  // ניסיון 3: נתיב שלט כללי
+  return await tuya.request({
+    method: 'POST',
+    path: `/v1.0/infrareds/${infraredId}/remotes/${remoteId}/command`,
+    body: { code, value: numericValue },
+  });
+}
+
+// --- API ROUTES ---
 
 // 1. קבלת כל המכשירים
 app.get('/api/devices', async (req, res) => {
   try {
-    if (!TUYA_UID) {
-      return res.status(400).json({ success: false, error: 'TUYA_UID is not defined' });
-    }
+    const pathUrl = TUYA_USER_ID 
+      ? `/v1.0/users/${TUYA_USER_ID}/devices` 
+      : `/v1.0/iot-03/devices`;
+
     const response = await tuya.request({
-      path: `/v1.0/users/${TUYA_UID}/devices`,
       method: 'GET',
+      path: pathUrl,
     });
 
     if (response.success) {
-      res.json({ success: true, devices: response.result });
+      res.json({ success: true, devices: response.result || [] });
     } else {
-      res.status(400).json({ success: false, error: response.msg });
+      res.status(400).json({ success: false, error: response.msg || 'Failed to fetch devices' });
     }
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+  } catch (error) {
+    console.error('Error fetching devices:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
-// 2. שליחת פקודות (מתגים רגילים מול מזגני IR בנתיב הייעודי)
-app.post('/api/devices/:id/command', async (req, res) => {
-  const { id } = req.params;
-  const { commands, deviceName, isAc, acPayload } = req.body;
-
+// 2. קבלת שלטי IR עבור רכזת
+app.get('/api/ir/:infraredId/remotes', async (req, res) => {
+  const { infraredId } = req.params;
   try {
-    let response;
+    const response = await tuya.request({
+      method: 'GET',
+      path: `/v2.0/infrareds/${infraredId}/remotes`,
+    });
 
-    // מקרה 1: הפעלת מזגן דרך נתיב ה-IR של הרכזת
-    if (isAc && acPayload) {
-      const irPayload = {
-        power: acPayload.power ?? 1,
-        temp: Number(acPayload.temperature || 24),
-        mode: MODE_MAP[acPayload.mode] ?? 0,
-        wind: WIND_MAP[acPayload.wind] ?? 0
-      };
-
-      console.log(`Sending IR command via Hub [${FIXED_IR_HUB_ID}] to AC [${id}]:`, irPayload);
-
-      response = await tuya.request({
-        path: `/v1.0/infrareds/${FIXED_IR_HUB_ID}/air-conditioners/${id}/command`,
-        method: 'POST',
-        body: irPayload
-      });
-    } 
-    // מקרה 2: מתג או שקע חכם רגיל
-    else {
-      const cleanCommands = commands ? commands.filter(c => c.code && c.value !== undefined) : [];
-      console.log(`Sending standard command to device [${id}]:`, cleanCommands);
-
-      response = await tuya.request({
-        path: `/v1.0/devices/${id}/commands`,
-        method: 'POST',
-        body: { commands: cleanCommands }
-      });
+    if (response.success) {
+      res.json({ success: true, remotes: response.result || [] });
+    } else {
+      res.status(400).json({ success: false, error: response.msg || 'Failed to fetch remotes' });
     }
+  } catch (error) {
+    console.error('Error fetching remotes:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
 
-    if (response && response.success) {
-      addLog(deviceName || id, 'manual', 'success', isAc ? 'הפעלת מזגן' : 'מתג', 'הפקודה נשלחה בהצלחה');
+// 3. שליחת פקודה למתג/דוד רגיל
+app.post('/api/devices/:deviceId/command', async (req, res) => {
+  const { deviceId } = req.params;
+  const { commands } = req.body;
+  try {
+    const response = await tuya.request({
+      method: 'POST',
+      path: `/v1.0/iot-03/devices/${deviceId}/commands`,
+      body: { commands },
+    });
+
+    if (response.success) {
       res.json({ success: true, result: response.result });
     } else {
-      const errMsg = response?.msg || JSON.stringify(response) || 'נדחה על ידי Tuya';
-      addLog(deviceName || id, 'manual', 'failed', 'שגיאת פקודה', errMsg);
-      res.status(400).json({ success: false, error: errMsg });
+      res.status(400).json({ success: false, error: response.msg || 'Failed to send command' });
     }
-  } catch (err) {
-    console.error('Command Error:', err);
-    const errDetails = err.message || JSON.stringify(err);
-    addLog(deviceName || id, 'manual', 'failed', 'error', errDetails);
-    res.status(500).json({ success: false, error: errDetails });
+  } catch (error) {
+    console.error('Error sending device command:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
-// 3. קבלת אוטומציות
-app.get('/api/automations', (req, res) => {
-  db.all(`SELECT * FROM automations`, [], (err, rows) => {
-    if (err) return res.status(500).json({ success: false, error: err.message });
-    const automations = rows.map(r => ({
-      ...r,
-      days: r.days ? JSON.parse(r.days) : []
-    }));
-    res.json({ success: true, automations });
-  });
-});
+// 4. שליחת פקודה למזגן IR (מתוקן: נתיב air-conditioners תקני)
+app.post('/api/ir/:infraredId/remotes/:remoteId/ac-command', async (req, res) => {
+  const { infraredId, remoteId } = req.params;
+  const { code, value } = req.body;
+  try {
+    const response = await sendAcCommandToTuya(infraredId, remoteId, code, value);
 
-// 4. יצירת אוטומציה חדשה
-app.post('/api/automations', (req, res) => {
-  const { title, type, deviceId, action, time, days, durationMinutes } = req.body;
-  const daysStr = JSON.stringify(days || []);
-
-  db.run(
-    `INSERT INTO automations (title, type, deviceId, action, time, days, durationMinutes) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    [title, type, deviceId, action, time, daysStr, durationMinutes || 0],
-    function (err) {
-      if (err) return res.status(500).json({ success: false, error: err.message });
-      res.json({ success: true, id: this.lastID });
+    if (response && response.success) {
+      res.json({ success: true, result: response.result });
+    } else {
+      res.status(400).json({ success: false, error: response ? response.msg : 'Failed to send AC command' });
     }
-  );
+  } catch (error) {
+    console.error('Error sending AC command:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
 });
 
-// 5. מחיקת אוטומציה
+// 5. קבלת אוטומציות
+app.get('/api/automations', (req, res) => {
+  res.json({ success: true, automations });
+});
+
+// 6. יצירת אוטומציה חדשה
+app.post('/api/automations', (req, res) => {
+  try {
+    const newAuto = {
+      id: Date.now().toString(),
+      title: req.body.title || 'ללא שם',
+      deviceId: req.body.deviceId,
+      infraredId: req.body.infraredId || null,
+      type: req.body.type || 'switch', // 'ac', 'tv', או 'switch'
+      action: req.body.action || 'turn_on', // 'turn_on' או 'turn_off'
+      time: req.body.time, // 'HH:mm'
+      days: req.body.days || [], // [0..6]
+      durationMinutes: Number(req.body.durationMinutes) || 0
+    };
+
+    automations.push(newAuto);
+    saveAutomations(automations);
+    console.log('✅ נוצרה אוטומציה חדשה:', newAuto);
+    res.json({ success: true, automation: newAuto });
+  } catch (error) {
+    console.error('❌ שגיאה בשמירת אוטומציה:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// 7. מחיקת אוטומציה
 app.delete('/api/automations/:id', (req, res) => {
-  db.run(`DELETE FROM automations WHERE id = ?`, req.params.id, function (err) {
-    if (err) return res.status(500).json({ success: false, error: err.message });
-    res.json({ success: true, changes: this.changes });
-  });
-});
-
-// 6. קבלת לוגים
-app.get('/api/logs', (req, res) => {
-  db.all(`SELECT * FROM logs ORDER BY id DESC LIMIT 100`, [], (err, rows) => {
-    if (err) return res.status(500).json({ success: false, error: err.message });
-    res.json({ success: true, logs: rows });
-  });
-});
-
-// 7. מחיקת לוגים
-app.delete('/api/logs', (req, res) => {
-  db.run(`DELETE FROM logs`, function (err) {
-    if (err) return res.status(500).json({ success: false, error: err.message });
+  const { id } = req.params;
+  try {
+    automations = automations.filter(a => a.id !== id);
+    saveAutomations(automations);
+    console.log(`🗑️ נמחקה אוטומציה עם מזהה: ${id}`);
     res.json({ success: true });
-  });
+  } catch (error) {
+    console.error('❌ שגיאה במחיקת אוטומציה:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
 });
 
-// --- מנגנון תזמונים (Cron) ---
-cron.schedule('* * * * *', () => {
+// --- מנגנון בדיקת והפעלת אוטומציות לפי שעון ישראל ---
+setInterval(async () => {
   const now = new Date();
-  const currentHour = now.getHours().toString().padStart(2, '0');
-  const currentMinute = now.getMinutes().toString().padStart(2, '0');
-  const currentTime = `${currentHour}:${currentMinute}`;
-  const currentDay = now.getDay();
+  
+  const israelTimeString = now.toLocaleTimeString('en-GB', { timeZone: 'Asia/Jerusalem', hour: '2-digit', minute: '2-digit', hour12: false });
+  const israelDateObj = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Jerusalem' }));
+  const israelDay = israelDateObj.getDay();
 
-  db.all(`SELECT * FROM automations WHERE time = ?`, [currentTime], (err, automations) => {
-    if (err) return;
+  console.log(`🔍 [Interval] שעון ישראל כעת: ${israelTimeString}, יום בשבוע: ${israelDay}, סך אוטומציות בזיכרון: ${automations.length}`);
 
-    automations.forEach(async (auto) => {
-      const days = auto.days ? JSON.parse(auto.days) : [];
-      if (!days.includes(currentDay)) return;
+  for (const auto of automations) {
+    console.log(`- בדיקת אוטומציה "${auto.title}": מיועדת לשעה ${auto.time}`);
 
-      try {
-        const commandValue = auto.action === 'turn_on' ? true : false;
-        
-        if (auto.type === 'ac') {
-          const irPayload = { power: commandValue ? 1 : 0, temp: 24, mode: 0, wind: 0 };
-          await tuya.request({
-            path: `/v1.0/infrareds/${FIXED_IR_HUB_ID}/air-conditioners/${auto.deviceId}/command`,
-            method: 'POST',
-            body: irPayload
-          });
-          addLog(auto.title, 'automation', 'success', auto.action, 'מזגן הופעל אוטומטית');
-        } else {
-          const commands = [{ code: 'switch_1', value: commandValue }];
-          await tuya.request({
-            path: `/v1.0/devices/${auto.deviceId}/commands`,
-            method: 'POST',
-            body: { commands }
-          });
-          addLog(auto.title, 'automation', 'success', auto.action, 'מתג הופעל אוטומטית');
-        }
-      } catch (err) {
-        addLog(auto.title, 'automation', 'failed', auto.action, err.message);
+    const triggerKey = `${auto.id}_${israelTimeString}_${israelDay}`;
+
+    if (auto.time === israelTimeString && Array.isArray(auto.days) && auto.days.includes(israelDay)) {
+      if (triggeredThisMinute.has(triggerKey)) {
+        continue;
       }
-    });
-  });
-});
+      triggeredThisMinute.add(triggerKey);
+
+      console.log(`⏰ מפעיל אוטומציה מתוזמנת: ${auto.title}`);
+      
+      try {
+        let response;
+        if (auto.type === 'ac') {
+          const powerValue = auto.action === 'turn_on' ? 1 : 0;
+          response = await sendAcCommandToTuya(auto.infraredId, auto.deviceId, 'power', powerValue);
+        } else {
+          const switchValue = auto.action === 'turn_on' ? true : false;
+          response = await tuya.request({
+            method: 'POST',
+            path: `/v1.0/iot-03/devices/${auto.deviceId}/commands`,
+            body: { commands: [{ code: 'switch_1', value: switchValue }] }
+          });
+        }
+
+        if (response && response.success) {
+          console.log(`✅ אוטומציה ${auto.title} הופעלה בהצלחה`);
+
+          // כיבוי אוטומטי במידה והוגדר
+          if (auto.durationMinutes > 0) {
+            console.log(`⏱️ נקבע כיבוי אוטומטי בעוד ${auto.durationMinutes} דקות עבור: ${auto.title}`);
+            setTimeout(async () => {
+              console.log(`⏱️ מפעיל כיבוי אוטומטי עבור: ${auto.title}`);
+              try {
+                if (auto.type === 'ac') {
+                  await sendAcCommandToTuya(auto.infraredId, auto.deviceId, 'power', 0);
+                } else {
+                  await tuya.request({
+                    method: 'POST',
+                    path: `/v1.0/iot-03/devices/${auto.deviceId}/commands`,
+                    body: { commands: [{ code: 'switch_1', value: false }] }
+                  });
+                }
+                console.log(`✅ כיבוי אוטומטי הושלם בהצלחה: ${auto.title}`);
+              } catch (err) {
+                console.error(`❌ שגיאה בביצוע כיבוי אוטומטי ל-${auto.title}:`, err.message || err);
+              }
+            }, auto.durationMinutes * 60 * 1000);
+          }
+        } else {
+          console.error(`❌ כישלון בהפעלת אוטומציה ${auto.title}:`, response ? response.msg : 'Unknown error');
+        }
+      } catch (error) {
+        console.error(`❌ שגיאה בהפעלת אוטומציה ${auto.title}:`, error.message || error);
+      }
+    }
+  }
+
+  if (triggeredThisMinute.size > 50) {
+    triggeredThisMinute.clear();
+  }
+}, 60000);
 
 app.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
+  console.log(`🚀 השרת רץ בהצלחה על פורט ${PORT}`);
 });
