@@ -58,7 +58,11 @@ const triggeredThisMinute = new Set();
 // פונקציית עזר לשליחת פקודות למזגן עם מנגנון גיבוי
 async function sendAcCommandToTuya(infraredId, remoteId, code, value) {
   const numericValue = Number(value);
-  const targetInfraredId = infraredId || TUYA_IR_HUB_ID;
+  const targetInfraredId = (infraredId && infraredId !== 'undefined' && infraredId !== 'null') 
+    ? infraredId 
+    : TUYA_IR_HUB_ID;
+
+  console.log(`📡 שולח פקודת מזגן: Hub=${targetInfraredId}, Remote=${remoteId}, Code=${code}, Value=${numericValue}`);
 
   // ניסיון 1: נתיב מזגנים תקני ב-Tuya OpenAPI
   try {
@@ -68,8 +72,9 @@ async function sendAcCommandToTuya(infraredId, remoteId, code, value) {
       body: { code, value: numericValue },
     });
     if (res1 && res1.success) return res1;
+    console.warn('Attempt 1 (air-conditioners standard) failed:', res1 ? res1.msg : 'Unknown');
   } catch (e) {
-    console.warn('Attempt 1 (air-conditioners standard) failed:', e.message);
+    console.warn('Attempt 1 (air-conditioners standard) error:', e.message);
   }
 
   // ניסיון 2: נתיב מזגנים עם מבנה פיילוד ישיר
@@ -80,16 +85,23 @@ async function sendAcCommandToTuya(infraredId, remoteId, code, value) {
       body: { [code]: numericValue },
     });
     if (res2 && res2.success) return res2;
+    console.warn('Attempt 2 (air-conditioners direct key) failed:', res2 ? res2.msg : 'Unknown');
   } catch (e) {
-    console.warn('Attempt 2 (air-conditioners direct key) failed:', e.message);
+    console.warn('Attempt 2 (air-conditioners direct key) error:', e.message);
   }
 
   // ניסיון 3: נתיב שלט כללי
-  return await tuya.request({
-    method: 'POST',
-    path: `/v1.0/infrareds/${targetInfraredId}/remotes/${remoteId}/command`,
-    body: { code, value: numericValue },
-  });
+  try {
+    const res3 = await tuya.request({
+      method: 'POST',
+      path: `/v1.0/infrareds/${targetInfraredId}/remotes/${remoteId}/command`,
+      body: { code, value: numericValue },
+    });
+    return res3;
+  } catch (e) {
+    console.warn('Attempt 3 (general remote) error:', e.message);
+    throw e;
+  }
 }
 
 // --- API ROUTES ---
@@ -99,10 +111,9 @@ app.get('/', (req, res) => {
   res.json({ success: true, message: 'Tuya Backend API is running smoothly 🚀' });
 });
 
-// 1. קבלת כל המכשירים - גילוי אוטומטי מלא (כולל שלטי IR ומגבלת עמודים)
+// 1. קבלת כל המכשירים - גילוי אוטומטי מלא + הצלבת רכזות IR בלעדית
 app.get('/api/devices', async (req, res) => {
   try {
-    // א. משיכת כל המכשירים הראשיים (עד 100 מכשירים בקריאה אחת)
     const pathUrl = TUYA_USER_ID 
       ? `/v1.0/users/${TUYA_USER_ID}/devices?page_no=1&page_size=100` 
       : `/v1.0/iot-03/devices?page_no=1&page_size=100`;
@@ -117,17 +128,23 @@ app.get('/api/devices', async (req, res) => {
     }
 
     const rawDevices = response.result || [];
-    let allDevices = [...rawDevices];
+    const deviceMap = new Map();
 
-    // ב. זיהוי אוטומטי של כל רכזות ה-IR בחשבון
+    // 1. הוספת כל המכשירים הפיזיים למפה
+    for (const dev of rawDevices) {
+      deviceMap.set(dev.id, { ...dev });
+    }
+
+    // 2. זיהוי אוטומטי של כל רכזות ה-IR בחשבון
     const irHubs = rawDevices.filter(d => 
       d.category === 'wnykq' || 
       d.category === 'pjkq' || 
       d.category === 'ykq' || 
-      (d.product_name && d.product_name.toLowerCase().includes('ir'))
+      (d.product_name && d.product_name.toLowerCase().includes('ir')) ||
+      (d.name && d.name.toLowerCase().includes('ir'))
     );
 
-    // ג. משיכת כל שלטי ה-IR מכל הרכזות במקביל
+    // 3. משיכת השלטים של כל רכזת והצמדת ה-infraredId המדויק שלהם
     for (const hub of irHubs) {
       try {
         const remotesRes = await tuya.request({
@@ -136,28 +153,33 @@ app.get('/api/devices', async (req, res) => {
         });
 
         if (remotesRes && remotesRes.success && Array.isArray(remotesRes.result)) {
-          // תיוג השלטים והוספת מזהה הרכזת המובילה
-          const remotes = remotesRes.result.map(remote => ({
-            ...remote,
-            infraredId: hub.id,
-            isVirtualIr: true,
-            // הגדרת קטגוריה אוטומטית למזגן/טלוויזיה במידה וחסר
-            category: remote.category_id === 5 ? 'infrared_ac' : (remote.category_id === 2 ? 'infrared_tv' : remote.category)
-          }));
+          for (const remote of remotesRes.result) {
+            const remoteId = remote.remote_id || remote.id;
+            const existing = deviceMap.get(remoteId) || {};
 
-          // הוספה לרשימה הראשית במידה והשלט לא קיים שם כבר
-          remotes.forEach(remote => {
-            if (!allDevices.some(d => d.id === remote.id)) {
-              allDevices.push(remote);
-            }
-          });
+            const category = (remote.category_id === 5 || remote.category_id === '5')
+              ? 'infrared_ac' 
+              : ((remote.category_id === 2 || remote.category_id === '2') ? 'infrared_tv' : (remote.category || existing.category));
+
+            // עדכון המכשיר במפה עם ה-infraredId המדויק של הרכזת שלו בבית
+            deviceMap.set(remoteId, {
+              ...existing,
+              ...remote,
+              id: remoteId,
+              infraredId: hub.id, // <--- הצמדה קריטית לרכזת הפיזית!
+              isVirtualIr: true,
+              category: category,
+              online: hub.online
+            });
+          }
         }
       } catch (err) {
         console.warn(`Failed to fetch remotes for hub ${hub.id}:`, err.message);
       }
     }
 
-    console.log(`📱 סך הכל נמצאו ${allDevices.length} מכשירים ושלטים בחשבון`);
+    const allDevices = Array.from(deviceMap.values());
+    console.log(`📱 סך הכל נמצאו ${allDevices.length} מכשירים ושלטים מוצלבים בחשבון`);
     res.json({ success: true, devices: allDevices });
 
   } catch (error) {
@@ -217,7 +239,7 @@ app.post('/api/devices/:id/command', async (req, res) => {
   }
 });
 
-// 4. שליחת פקודה למזגן IR דרך הנתיב הישיר
+// 4. שליחת פקודה למזגן/שלט IR דרך הנתיב הישיר
 app.post('/api/ir/:infraredId/remotes/:remoteId/ac-command', async (req, res) => {
   const { infraredId, remoteId } = req.params;
   const { code, value } = req.body;
@@ -288,19 +310,16 @@ app.get('/api/debug/device/:id', async (req, res) => {
   try {
     console.log(`[Debug] שולף מפרט עבור מכשיר: ${id}`);
 
-    // פרטי המכשיר והקטגוריה
     const detailsRes = await tuya.request({
       method: 'GET',
       path: `/v1.0/iot-03/devices/${id}`,
     });
 
-    // סטטוס נוכחי
     const statusRes = await tuya.request({
       method: 'GET',
       path: `/v1.0/iot-03/devices/${id}/status`,
     });
 
-    // רשימת הפקודות והערכים המותרים
     const functionsRes = await tuya.request({
       method: 'GET',
       path: `/v1.0/iot-03/devices/${id}/functions`,
@@ -330,8 +349,6 @@ setInterval(async () => {
   console.log(`🔍 [Interval] שעון ישראל כעת: ${israelTimeString}, יום בשבוע: ${israelDay}, סך אוטומציות בזיכרון: ${automations.length}`);
 
   for (const auto of automations) {
-    console.log(`- בדיקת אוטומציה "${auto.title}": מיועדת לשעה ${auto.time}`);
-
     const triggerKey = `${auto.id}_${israelTimeString}_${israelDay}`;
 
     if (auto.time === israelTimeString && Array.isArray(auto.days) && auto.days.includes(israelDay)) {
@@ -366,7 +383,6 @@ setInterval(async () => {
         if (response && response.success) {
           console.log(`✅ אוטומציה ${auto.title} הופעלה בהצלחה`);
 
-          // כיבוי אוטומטי במידה והוגדר
           if (auto.durationMinutes > 0) {
             console.log(`⏱️ נקבע כיבוי אוטומטי בעוד ${auto.durationMinutes} דקות עבור: ${auto.title}`);
             setTimeout(async () => {
