@@ -209,6 +209,9 @@ app.post('/api/automations', (req, res) => {
       time: req.body.time, // 'HH:mm'
       days: req.body.days || [], // [0..6]
       durationMinutes: Number(req.body.durationMinutes) || 0,
+      ...(req.body.temp !== undefined && { temp: req.body.temp }),
+      ...(req.body.mode !== undefined && { mode: req.body.mode }),
+      ...(req.body.wind !== undefined && { wind: req.body.wind })
     };
 
     automations.push(newAuto);
