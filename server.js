@@ -261,9 +261,16 @@ setInterval(async () => {
       try {
         let response;
         if (auto.type === 'ac') {
-          const powerValue = auto.action === 'turn_on' ? 1 : 0;
-          response = await sendAcCommandToTuya(auto.infraredId, auto.deviceId, 'power', powerValue);
-        } else {
+  if (auto.action === 'turn_on') {
+    response = await sendAcCommandToTuya(auto.infraredId, auto.deviceId, 'power', 1);
+    
+    if (auto.temp) await sendAcCommandToTuya(auto.infraredId, auto.deviceId, 'temp', auto.temp);
+    if (auto.mode !== undefined) await sendAcCommandToTuya(auto.infraredId, auto.deviceId, 'mode', auto.mode);
+    if (auto.wind !== undefined) await sendAcCommandToTuya(auto.infraredId, auto.deviceId, 'wind', auto.wind);
+  } else {
+    response = await sendAcCommandToTuya(auto.infraredId, auto.deviceId, 'power', 0);
+  }
+} else {
           const switchValue = auto.action === 'turn_on' ? true : false;
           response = await tuya.request({
             method: 'POST',
