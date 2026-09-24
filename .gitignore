@@ -1,2 +1,4 @@
 node_modules
 .env
+automations.json
+automations.json.tmp
